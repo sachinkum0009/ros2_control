@@ -16,19 +16,34 @@
 
 #include <fmt/compile.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <exception>
+#include <iomanip>
+#include <iterator>
 #include <memory>
+#include <numeric>
+#include <regex>
 #include <set>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "controller_interface/controller_interface_base.hpp"
 #include "controller_manager_msgs/msg/hardware_component_state.hpp"
+#include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "hardware_interface/helpers.hpp"
 #include "hardware_interface/introspection.hpp"
 #include "hardware_interface/types/lifecycle_state_names.hpp"
+#include "libstatistics_collector/moving_average_statistics/types.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "rcl/arguments.h"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/version.h"
 #include "rclcpp_lifecycle/state.hpp"
 
@@ -117,7 +132,7 @@ bool is_interface_a_chained_interface(
   {
     RCLCPP_FATAL(
       rclcpp::get_logger("ControllerManager::utils"),
-      "Character '/', was not find in the interface name '%s'. This should never happen. "
+      "Character '/', was not found in the interface name '%s'. This should never happen. "
       "Stop the controller manager immediately and restart it.",
       interface_name.c_str());
     throw std::runtime_error("Mismatched interface name. See the FATAL message above.");
@@ -731,6 +746,7 @@ void ControllerManager::initialize_parameters()
     cm_param_listener_ = std::make_shared<controller_manager::ParamListener>(
       this->get_node_parameters_interface(), this->get_logger());
     params_ = std::make_shared<controller_manager::Params>(cm_param_listener_->get_params());
+    overruns_print_warnings_.store(params_->overruns.print_warnings, std::memory_order_relaxed);
     update_rate_ = static_cast<unsigned int>(params_->update_rate);
     trigger_clock_ =
       use_sim_time_ ? this->get_clock() : std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
@@ -932,6 +948,7 @@ void ControllerManager::set_initial_hardware_components_state()
   if (cm_param_listener_->is_old(*params_))
   {
     *params_ = cm_param_listener_->get_params();
+    overruns_print_warnings_.store(params_->overruns.print_warnings, std::memory_order_relaxed);
   }
 
   // unconfigured (loaded only)
@@ -1551,6 +1568,7 @@ controller_interface::return_type ControllerManager::cleanup_controller(
   if (result == controller_interface::return_type::OK)
   {
     RCLCPP_DEBUG(get_logger(), "Successfully cleaned-up controller '%s'", controller_name.c_str());
+    publish_activity();
   }
 
   return result;
@@ -1614,27 +1632,15 @@ controller_interface::return_type ControllerManager::configure_controller(
   }
   auto controller = found_it->c;
 
-  const auto & state = controller->get_lifecycle_state();
-  if (
-    state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE ||
-    state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED)
+  if (!is_controller_unconfigured(*controller))
   {
     RCLCPP_ERROR(
       get_logger(), "Controller '%s' can not be configured from '%s' state.",
-      controller_name.c_str(), state.label().c_str());
+      controller_name.c_str(), controller->get_lifecycle_state().label().c_str());
     return controller_interface::return_type::ERROR;
   }
 
-  if (state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
-  {
-    RCLCPP_DEBUG(
-      get_logger(), "Controller '%s' is cleaned-up before configuring", controller_name.c_str());
-    if (cleanup_controller(*found_it) != controller_interface::return_type::OK)
-    {
-      return controller_interface::return_type::ERROR;
-    }
-  }
-  // For cases, when the controller ends up in the unconfigured state from any other state
+  // Remove any stale exported interfaces from a prior configure cycle before re-configuring.
   cleanup_controller_exported_interfaces(*found_it);
 
   try
@@ -1888,7 +1894,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
   {
     RCLCPP_FATAL(
       get_logger(),
-      "The internal deactivate and activat requests command interface lists are not empty at the "
+      "The internal deactivate and activate requests command interface lists are not empty at the "
       "switch_controller() call. This should never happen.");
     throw std::runtime_error("CM's internal state is not correct. See the FATAL message above.");
   }
@@ -3687,7 +3693,9 @@ void ControllerManager::write(const rclcpp::Time & time, const rclcpp::Duration 
   execution_time_.total_time =
     execution_time_.write_time + execution_time_.update_time + execution_time_.read_time;
   const double expected_cycle_time = 1.e6 / static_cast<double>(get_update_rate());
-  if (params_->overruns.print_warnings && execution_time_.total_time > expected_cycle_time)
+  if (
+    overruns_print_warnings_.load(std::memory_order_relaxed) &&
+    execution_time_.total_time > expected_cycle_time)
   {
     if (execution_time_.switch_time > 0.0)
     {
@@ -3852,7 +3860,7 @@ void ControllerManager::propagate_deactivation_of_chained_mode(
       {
         RCLCPP_DEBUG(
           get_logger(),
-          "Controller with name '%s' can not be deactivated since is not active. "
+          "Controller with name '%s' can not be deactivated since it is not active. "
           "The controller will be removed from the list later."
           "Skipping adding following controllers to 'from' chained mode request.",
           controller.info.name.c_str());
@@ -4448,6 +4456,7 @@ void ControllerManager::controller_activity_diagnostic_callback(
   if (cm_param_listener_->is_old(*params_))
   {
     *params_ = cm_param_listener_->get_params();
+    overruns_print_warnings_.store(params_->overruns.print_warnings, std::memory_order_relaxed);
   }
 
   auto make_stats_string =
@@ -4627,6 +4636,7 @@ void ControllerManager::hardware_components_diagnostic_callback(
   if (cm_param_listener_->is_old(*params_))
   {
     *params_ = cm_param_listener_->get_params();
+    overruns_print_warnings_.store(params_->overruns.print_warnings, std::memory_order_relaxed);
   }
 
   auto make_stats_string =

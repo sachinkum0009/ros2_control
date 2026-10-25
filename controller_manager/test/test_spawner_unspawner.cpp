@@ -15,13 +15,19 @@
 #ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES
 #endif
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <future>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "controller_manager/controller_manager.hpp"
+#include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "controller_manager_test_common.hpp"
 #include "gmock/gmock.h"
 #include "lifecycle_msgs/msg/state.hpp"
@@ -130,6 +136,19 @@ TEST_F(TestLoadController, spawner_without_manager_errors_with_given_timeout)
 TEST_F(TestLoadController, spawner_without_type_parameter_or_arg_errors)
 {
   EXPECT_NE(call_spawner("ctrl_1 -c test_controller_manager"), 0) << "Missing .type parameter";
+}
+
+TEST_F(TestLoadController, spawner_ignores_empty_arguments)
+{
+  cm_->set_parameter(rclcpp::Parameter("ctrl_1.type", test_controller::TEST_CONTROLLER_CLASS_NAME));
+
+  ControllerManagerRunner cm_runner(this);
+  // Empty args reach the spawner when launched with shell=False and a substitution resolves to ""
+  EXPECT_EQ(call_spawner("ctrl_1 '' -c test_controller_manager ''"), 0);
+  ASSERT_EQ(cm_->get_loaded_controllers().size(), 1ul);
+  EXPECT_EQ(
+    cm_->get_loaded_controllers()[0].c->get_lifecycle_state().id(),
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
 }
 
 TEST_F(TestLoadController, spawner_test_type_in_param)
@@ -470,6 +489,8 @@ TEST_F(TestLoadController, spawner_test_with_global_wildcard_entries)
 
 TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
 {
+  constexpr auto kControllerManagerTimeout = "5.0";
+
   const std::string test_file_path =
     std::string(PARAMETERS_FILE_PATH) + std::string("test_controller_spawner_with_interfaces.yaml");
 
@@ -479,14 +500,22 @@ TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
     call_spawner(
       "ctrl_with_joint1_command_interface ctrl_with_joint2_command_interface -c "
       "test_controller_manager "
-      "--controller-manager-timeout 1.0 "
+      "--controller-manager-timeout " +
+      std::string(kControllerManagerTimeout) +
+      " "
       "-p " +
       test_file_path),
     0);
 
-  ASSERT_EQ(cm_->get_loaded_controllers().size(), 2ul);
+  ASSERT_TRUE(controller_manager::test::wait_for_loaded_controller_count(cm_, 2ul));
 
-  auto ctrl_with_joint2_command_interface = cm_->get_loaded_controllers()[0];
+  const auto loaded_after_first_spawn = cm_->get_loaded_controllers();
+  const auto it_ctrl_with_joint2_command_interface =
+    controller_manager::test::find_loaded_controller_by_name(
+      loaded_after_first_spawn, "ctrl_with_joint2_command_interface");
+  ASSERT_NE(it_ctrl_with_joint2_command_interface, loaded_after_first_spawn.end());
+  const auto ctrl_with_joint2_command_interface = *it_ctrl_with_joint2_command_interface;
+
   ASSERT_EQ(ctrl_with_joint2_command_interface.info.name, "ctrl_with_joint2_command_interface");
   ASSERT_EQ(
     ctrl_with_joint2_command_interface.info.type, test_controller::TEST_CONTROLLER_CLASS_NAME);
@@ -499,7 +528,12 @@ TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
     ctrl_with_joint2_command_interface.c->command_interface_configuration().names,
     std::vector<std::string>({"joint2/velocity"}));
 
-  auto ctrl_with_joint1_command_interface = cm_->get_loaded_controllers()[1];
+  const auto it_ctrl_with_joint1_command_interface =
+    controller_manager::test::find_loaded_controller_by_name(
+      loaded_after_first_spawn, "ctrl_with_joint1_command_interface");
+  ASSERT_NE(it_ctrl_with_joint1_command_interface, loaded_after_first_spawn.end());
+  const auto ctrl_with_joint1_command_interface = *it_ctrl_with_joint1_command_interface;
+
   ASSERT_EQ(ctrl_with_joint1_command_interface.info.name, "ctrl_with_joint1_command_interface");
   ASSERT_EQ(
     ctrl_with_joint1_command_interface.info.type, test_controller::TEST_CONTROLLER_CLASS_NAME);
@@ -515,16 +549,30 @@ TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
   EXPECT_EQ(
     call_spawner(
       "ctrl_with_joint1_and_joint2_command_interfaces -c test_controller_manager "
-      "--controller-manager-timeout 1.0 "
+      "--controller-manager-timeout " +
+      std::string(kControllerManagerTimeout) +
+      " "
       "-p " +
       test_file_path),
     256)
     << "Should fail as the ctrl_with_joint1_command_interface and "
        "ctrl_with_joint2_command_interface are active";
 
-  ASSERT_EQ(cm_->get_loaded_controllers().size(), 3ul);
+  ASSERT_TRUE(
+    controller_manager::test::wait_for_loaded_controller(
+      cm_, "ctrl_with_joint1_and_joint2_command_interfaces"))
+    << "Expected the controller to be loaded, even if activation fails.";
+  ASSERT_TRUE(controller_manager::test::wait_for_loaded_controller_count(cm_, 3ul));
 
-  auto ctrl_with_joint1_and_joint2_command_interfaces = cm_->get_loaded_controllers()[0];
+  const auto loaded_after_failed_activation = cm_->get_loaded_controllers();
+  const auto it_ctrl_with_joint1_and_joint2_command_interfaces =
+    controller_manager::test::find_loaded_controller_by_name(
+      loaded_after_failed_activation, "ctrl_with_joint1_and_joint2_command_interfaces");
+  ASSERT_NE(
+    it_ctrl_with_joint1_and_joint2_command_interfaces, loaded_after_failed_activation.end());
+  const auto ctrl_with_joint1_and_joint2_command_interfaces =
+    *it_ctrl_with_joint1_and_joint2_command_interfaces;
+
   ASSERT_EQ(
     ctrl_with_joint1_and_joint2_command_interfaces.info.name,
     "ctrl_with_joint1_and_joint2_command_interfaces");
@@ -544,11 +592,13 @@ TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
 
   EXPECT_EQ(call_unspawner("ctrl_with_joint1_command_interface -c test_controller_manager"), 0);
 
-  ASSERT_EQ(cm_->get_loaded_controllers().size(), 2ul);
+  ASSERT_TRUE(controller_manager::test::wait_for_loaded_controller_count(cm_, 2ul));
   EXPECT_EQ(
     call_spawner(
       "ctrl_with_joint1_and_joint2_command_interfaces -c test_controller_manager "
-      "--controller-manager-timeout 1.0 "
+      "--controller-manager-timeout " +
+      std::string(kControllerManagerTimeout) +
+      " "
       "-p " +
       test_file_path),
     256)
@@ -556,11 +606,13 @@ TEST_F(TestLoadController, spawner_test_failed_activation_of_controllers)
 
   EXPECT_EQ(call_unspawner("ctrl_with_joint2_command_interface -c test_controller_manager"), 0);
 
-  ASSERT_EQ(cm_->get_loaded_controllers().size(), 1ul);
+  ASSERT_TRUE(controller_manager::test::wait_for_loaded_controller_count(cm_, 1ul));
   EXPECT_EQ(
     call_spawner(
       "ctrl_with_joint1_and_joint2_command_interfaces -c test_controller_manager "
-      "--controller-manager-timeout 1.0 "
+      "--controller-manager-timeout " +
+      std::string(kControllerManagerTimeout) +
+      " "
       "-p " +
       test_file_path),
     0)
@@ -603,6 +655,100 @@ TEST_F(TestLoadController, unload_on_kill_activate_as_group)
     << "timeout should have killed spawner and returned non 0 code";
 
   ASSERT_EQ(cm_->get_loaded_controllers().size(), 0ul);
+}
+
+TEST_F(TestLoadController, unload_on_kill_does_not_block_other_spawners)
+{
+  // Verifies that --unload-on-kill releases the file lock before entering the interrupt wait loop.
+  ControllerManagerRunner cm_runner(this);
+  cm_->set_parameter(rclcpp::Parameter("ctrl_1.type", test_controller::TEST_CONTROLLER_CLASS_NAME));
+  cm_->set_parameter(rclcpp::Parameter("ctrl_2.type", test_controller::TEST_CONTROLLER_CLASS_NAME));
+
+  auto get_active_controller_names = [this]()
+  {
+    std::vector<std::string> active_controller_names;
+    for (const auto & ctrl : cm_->get_loaded_controllers())
+    {
+      if (ctrl.c->get_lifecycle_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+      {
+        active_controller_names.push_back(ctrl.info.name);
+      }
+    }
+    return active_controller_names;
+  };
+
+  auto get_loaded_controller_names = [this]()
+  {
+    std::vector<std::string> loaded_controller_names;
+    for (const auto & ctrl : cm_->get_loaded_controllers())
+    {
+      loaded_controller_names.push_back(ctrl.info.name);
+    }
+    return loaded_controller_names;
+  };
+
+  // Run Spawner A with --unload-on-kill in background, keep it alive long enough to ensure
+  // Spawner B can verify lock release behavior.
+  std::string spawner_a_cmd =
+    "timeout --signal=INT 30 "
+    "$(ros2 pkg prefix controller_manager)/lib/controller_manager/spawner "
+    "ctrl_1 -c test_controller_manager --unload-on-kill";
+  auto spawner_a_future = std::async(
+    std::launch::async, [spawner_a_cmd]() { return std::system(spawner_a_cmd.c_str()); });
+
+  // Wait until ctrl_1 is active, confirming Spawner A released the lock before the wait loop.
+  auto wait_start = std::chrono::steady_clock::now();
+  auto is_ctrl_1_active = [this]()
+  {
+    for (const auto & ctrl : cm_->get_loaded_controllers())
+    {
+      if (ctrl.info.name == "ctrl_1")
+      {
+        return ctrl.c->get_lifecycle_state().id() ==
+               lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+      }
+    }
+    return false;
+  };
+
+  while (!is_ctrl_1_active())
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ASSERT_LT(std::chrono::steady_clock::now() - wait_start, std::chrono::seconds(10))
+      << "Timed out waiting for ctrl_1 to become active via Spawner A";
+  }
+
+  EXPECT_EQ(spawner_a_future.wait_for(std::chrono::seconds(0)), std::future_status::timeout)
+    << "Spawner A exited before Spawner B started; lock-contention scenario was not exercised";
+
+  // Spawner B must not be blocked by Spawner A's lock. Keep B's timeout below A's lifetime so a
+  // lock blockage cannot still pass after A eventually exits.
+  // Avoid concurrent writes to the same .coverage file by not wrapping Spawner B with coverage.
+  std::string spawner_b_cmd =
+    "timeout --signal=INT 4 "
+    "$(ros2 pkg prefix controller_manager)/lib/controller_manager/spawner "
+    "ctrl_2 -c test_controller_manager";
+  int spawner_b_exit_code = std::system(spawner_b_cmd.c_str());
+  EXPECT_EQ(spawner_b_exit_code, 0)
+    << "Spawner B should not be blocked by Spawner A's --unload-on-kill lock";
+  ASSERT_THAT(get_active_controller_names(), testing::UnorderedElementsAre("ctrl_1", "ctrl_2"));
+
+  EXPECT_EQ(spawner_a_future.wait_for(std::chrono::seconds(0)), std::future_status::timeout)
+    << "Spawner A exited already; lock-contention scenario might not be exercised";
+
+  // Interrupt Spawner A as soon as lock behavior is validated to avoid waiting for timeout.
+  int interrupt_exit_code = std::system(
+    "pkill -INT -f 'controller_manager/[s]pawner ctrl_1 -c test_controller_manager "
+    "--unload-on-kill'");
+  EXPECT_EQ(interrupt_exit_code, 0) << "Failed to interrupt Spawner A";
+
+  // Wait for Spawner A to exit. Exit status after SIGINT is platform-dependent,
+  // so validate behavior via controller state checks below.
+  spawner_a_future.get();
+
+  // After Spawner A is interrupted, ctrl_1 should be unloaded, leaving only ctrl_2 active.
+  ASSERT_THAT(get_loaded_controller_names(), testing::UnorderedElementsAre("ctrl_2"));
+  ASSERT_THAT(get_active_controller_names(), testing::UnorderedElementsAre("ctrl_2"));
 }
 
 TEST_F(TestLoadController, unload_on_kill_with_sigterm)
@@ -1460,4 +1606,37 @@ TEST_F(TestLoadController, spawner_test_parsing_same_params_file_multiple_times)
   params_file_info = cm_->get_parameter("ctrl_1.params_file").as_string_array();
   ASSERT_EQ(params_file_info.size(), 1ul);
   ASSERT_EQ(params_file_info[0], fallback_test_file_path);
+}
+
+TEST_F(TestLoadController, spawner_test_reconfigure_controller)
+{
+  cm_->set_parameter(rclcpp::Parameter("ctrl_1.type", test_controller::TEST_CONTROLLER_CLASS_NAME));
+
+  ControllerManagerRunner cm_runner(this);
+  EXPECT_EQ(call_spawner("ctrl_1 -c test_controller_manager --inactive"), 0);
+
+  ASSERT_EQ(cm_->get_loaded_controllers().size(), 1ul);
+  auto ctrl_1 = cm_->get_loaded_controllers()[0];
+  ASSERT_EQ(
+    ctrl_1.c->get_lifecycle_state().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_TRUE(ctrl_1.c->command_interface_configuration().names.empty());
+
+  // this parameter is only read in on_configure()
+  ctrl_1.c->get_node()->set_parameter(
+    rclcpp::Parameter("command_interfaces", std::vector<std::string>({"joint1/position"})));
+
+  // not configured again, so the changed parameter is not applied
+  EXPECT_EQ(call_spawner("ctrl_1 -c test_controller_manager --inactive"), 0);
+  EXPECT_EQ(
+    ctrl_1.c->get_lifecycle_state().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(ctrl_1.c->command_interface_configuration().names.empty());
+
+  EXPECT_EQ(call_spawner("ctrl_1 -c test_controller_manager --inactive --reconfigure"), 0);
+  EXPECT_EQ(
+    ctrl_1.c->get_lifecycle_state().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_THAT(
+    ctrl_1.c->command_interface_configuration().names,
+    std::vector<std::string>({"joint1/position"}));
+
+  cm_->unload_controller("ctrl_1");
 }

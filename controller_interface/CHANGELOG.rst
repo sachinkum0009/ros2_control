@@ -2,6 +2,26 @@
 Changelog for package controller_interface
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+6.12.0 (2026-10-07)
+-------------------
+* Breaking: Remove deprecated methods from Rolling and Lyrical (`#3610 <https://github.com/ros-controls/ros2_control/issues/3610>`_)
+* Contributors: Sai Kishor Kothakota
+
+6.11.0 (2026-10-05)
+-------------------
+
+6.10.1 (2026-09-08)
+-------------------
+
+6.10.0 (2026-09-02)
+-------------------
+
+6.9.0 (2026-08-10)
+------------------
+* Add RangeSensor unit coverage (`#3522 <https://github.com/ros-controls/ros2_control/issues/3522>`_)
+* Document realtime-safe methods (`#3392 <https://github.com/ros-controls/ros2_control/issues/3392>`_)
+* Contributors: Dennis Lanov, Shivam Maurya
+
 6.8.0 (2026-07-01)
 ------------------
 * Improve docstring of the semantic_components for consistency (`#3338 <https://github.com/ros-controls/ros2_control/issues/3338>`_)

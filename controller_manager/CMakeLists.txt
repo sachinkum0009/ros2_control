@@ -8,6 +8,7 @@ export_windows_symbols()
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
   controller_manager_msgs
+  diagnostic_msgs
   diagnostic_updater
   fmt
   generate_parameter_library
@@ -15,14 +16,16 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   libstatistics_collector
   lifecycle_msgs
   pluginlib
+  rcl
+  rcl_interfaces
   rclcpp
+  rclcpp_lifecycle
   realtime_tools
   std_msgs
 )
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
-find_package(ament_cmake_core REQUIRED)
 find_package(ament_cmake_gen_version_h REQUIRED)
 find_package(backward_ros REQUIRED)
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -46,13 +49,17 @@ target_link_libraries(controller_manager PUBLIC
                       diagnostic_updater::diagnostic_updater
                       hardware_interface::hardware_interface
                       pluginlib::pluginlib
+                      rcl::rcl
                       rclcpp::rclcpp
                       rclcpp_lifecycle::rclcpp_lifecycle
                       realtime_tools::realtime_tools
                       libstatistics_collector::libstatistics_collector
                       fmt::fmt
                       ${std_msgs_TARGETS}
-                      ${controller_manager_msgs_TARGETS})
+                      ${controller_manager_msgs_TARGETS}
+                      ${diagnostic_msgs_TARGETS}
+                      ${lifecycle_msgs_TARGETS}
+                      ${rcl_interfaces_TARGETS})
 
 add_executable(ros2_control_node
   src/ros2_control_node.cpp
@@ -66,6 +73,10 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gmock REQUIRED)
   find_package(ros2_control_test_assets REQUIRED)
   find_package(example_interfaces REQUIRED)
+
+  option(ROS2_CONTROL_STRICT_TIMING_TESTS
+    "Use strict timing-sensitive assertions in ros2_control tests. Turn ON for RT-capable local validation."
+    ON)
 
   # Plugin Libraries that are built and installed for use in testing
   add_library(test_controller SHARED test/test_controller/test_controller.cpp)
@@ -112,6 +123,9 @@ if(BUILD_TESTING)
     test_chainable_controller
     ros2_control_test_assets::ros2_control_test_assets
   )
+  target_compile_definitions(
+    test_controller_manager
+    PRIVATE ROS2_CONTROL_STRICT_TIMING_TESTS=$<BOOL:${ROS2_CONTROL_STRICT_TIMING_TESTS}>)
 
   ament_add_gmock(test_controller_manager_with_namespace
     test/test_controller_manager_with_namespace.cpp
@@ -206,7 +220,6 @@ if(BUILD_TESTING)
   target_link_libraries(test_controller_failed_activate PUBLIC
     controller_manager
   )
-  target_compile_definitions(test_controller_failed_activate PRIVATE "CONTROLLER_MANAGER_BUILDING_DLL")
   pluginlib_export_plugin_description_file(
     controller_interface test/test_controller_failed_activate/test_controller_failed_activate.xml)
   install(

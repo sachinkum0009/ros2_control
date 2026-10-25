@@ -12,17 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <regex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
+#include "controller_manager_msgs/srv/cleanup_controller.hpp"
+#include "controller_manager_msgs/srv/configure_controller.hpp"
 #include "controller_manager_msgs/srv/list_controller_types.hpp"
 #include "controller_manager_msgs/srv/list_controllers.hpp"
 #include "controller_manager_msgs/srv/list_hardware_interfaces.hpp"
+#include "controller_manager_msgs/srv/load_controller.hpp"
+#include "controller_manager_msgs/srv/reload_controller_libraries.hpp"
 #include "controller_manager_msgs/srv/switch_controller.hpp"
+#include "controller_manager_msgs/srv/unload_controller.hpp"
 #include "controller_manager_test_common.hpp"
 #include "gmock/gmock.h"
 #include "lifecycle_msgs/msg/state.hpp"
@@ -629,6 +640,9 @@ TEST_F(TestControllerManagerSrvs, configure_controller_srv)
   rclcpp::Client<controller_manager_msgs::srv::UnloadController>::SharedPtr unload_client =
     srv_node->create_client<controller_manager_msgs::srv::UnloadController>(
       "test_controller_manager/unload_controller");
+  rclcpp::Client<controller_manager_msgs::srv::CleanupController>::SharedPtr cleanup_client =
+    srv_node->create_client<controller_manager_msgs::srv::CleanupController>(
+      "test_controller_manager/cleanup_controller");
 
   auto request = std::make_shared<controller_manager_msgs::srv::ConfigureController::Request>();
   request->name = test_controller::TEST_CONTROLLER_NAME;
@@ -651,9 +665,9 @@ TEST_F(TestControllerManagerSrvs, configure_controller_srv)
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
     test_controller->get_lifecycle_state().id());
 
-  // call configure again and check the state + it shouldn't throw any exception
+  // configure_controller must reject any state other than UNCONFIGURED
   result = call_service_and_wait(*client, request, srv_executor, true);
-  ASSERT_TRUE(result->ok);
+  ASSERT_FALSE(result->ok) << "Controller configured from inactive state: " << request->name;
   EXPECT_EQ(1u, cm_->get_loaded_controllers().size());
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
@@ -701,9 +715,9 @@ TEST_F(TestControllerManagerSrvs, configure_controller_srv)
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
     test_chainable_controller->get_lifecycle_state().id());
 
-  // call configure again and check the state + it shouldn't throw any exception
+  // configure_controller must reject any state other than UNCONFIGURED
   result = call_service_and_wait(*client, request, srv_executor, true);
-  ASSERT_TRUE(result->ok);
+  ASSERT_FALSE(result->ok) << "Controller configured from inactive state: " << request->name;
   EXPECT_EQ(2u, cm_->get_loaded_controllers().size());
   EXPECT_EQ(
     test_chainable_controller::TEST_CONTROLLER_NAME,
@@ -713,6 +727,15 @@ TEST_F(TestControllerManagerSrvs, configure_controller_srv)
     cm_->get_loaded_controllers()[0].c->get_lifecycle_state().id());
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_chainable_controller->get_lifecycle_state().id());
+
+  // Cleanup to UNCONFIGURED so the duplicate-interface tests below can attempt configure
+  auto cleanup_request =
+    std::make_shared<controller_manager_msgs::srv::CleanupController::Request>();
+  cleanup_request->name = test_chainable_controller::TEST_CONTROLLER_NAME;
+  ASSERT_TRUE(call_service_and_wait(*cleanup_client, cleanup_request, srv_executor, true)->ok);
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED,
     test_chainable_controller->get_lifecycle_state().id());
 
   // Now try to configure the chainable controller with duplicated command interfaces
