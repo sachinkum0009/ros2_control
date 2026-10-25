@@ -8,8 +8,10 @@ export_windows_symbols()
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   control_msgs
   lifecycle_msgs
+  libstatistics_collector
   LibXml2
   pluginlib
+  rclcpp
   rclcpp_lifecycle
   rcpputils
   rcutils
@@ -56,6 +58,7 @@ target_link_libraries(hardware_interface PUBLIC
                       ${pal_statistics_LIBRARIES}
                       ${control_msgs_TARGETS}
                       ${lifecycle_msgs_TARGETS}
+                      ${libstatistics_collector_TARGETS}
                       fmt::fmt)
 
 add_library(mock_components SHARED
@@ -82,10 +85,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_macros rcpputils::rcpputils)
 
   ament_add_gmock(test_inst_hardwares test/test_inst_hardwares.cpp)
-  target_link_libraries(test_inst_hardwares hardware_interface rcpputils::rcpputils)
+  target_link_libraries(test_inst_hardwares hardware_interface)
 
   ament_add_gmock(test_joint_handle test/test_handle.cpp)
-  target_link_libraries(test_joint_handle hardware_interface rcpputils::rcpputils)
+  target_link_libraries(test_joint_handle hardware_interface)
 
   # Test helper methods
   ament_add_gmock(test_helpers test/test_helpers.cpp)
